@@ -1,0 +1,362 @@
+# PowerShell script for Cosmos DB migration
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$CosmosEndpoint,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$CosmosKey,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$DatabaseName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SourceContainer,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$DestinationContainer,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$BatchSize = 100,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$MaxConcurrency = 10,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$LogFile = "migration_log.txt"
+)
+
+# Install required modules if not present
+$requiredModules = @("CosmosDB")
+foreach ($module in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $module)) {
+        Write-Host "Installing module: $module"
+        Install-Module -Name $module -Force -Scope CurrentUser
+    }
+}
+
+# Import modules
+Import-Module CosmosDB
+
+# Initialize logging
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+    Write-Host $logEntry
+    Add-Content -Path $LogFile -Value $logEntry
+}
+
+# Initialize Cosmos DB connection
+function Initialize-CosmosConnection {
+    try {
+        $cosmosAccount = Get-CosmosDbAccount -Name $CosmosEndpoint -ResourceGroupName $ResourceGroupName
+        $cosmosContext = New-CosmosDbContext -Account $CosmosEndpoint -Key $CosmosKey
+        return $cosmosContext
+    }
+    catch {
+        Write-Log "Failed to initialize Cosmos DB connection: $_" "ERROR"
+        throw
+    }
+}
+
+# Transform source record to destination format
+function Transform-Record {
+    param([object]$SourceRecord)
+    
+    try {
+        # Implement your transformation logic here
+        $transformedRecord = @{
+            id = $SourceRecord.id
+            FullName = if ($SourceRecord.Name) { $SourceRecord.Name.ToUpper() } else { "UNKNOWN" }
+            EmailAddress = if ($SourceRecord.Email) { $SourceRecord.Email.ToLower() } else { $null }
+            ProcessedDate = (Get-Date).ToUniversalTime()
+            IsActive = $SourceRecord.Status -eq "Active"
+            TransformationVersion = "1.0"
+            Metadata = @{
+                OriginalCreatedDate = $SourceRecord.CreatedDate
+                OriginalStatus = $SourceRecord.Status
+                MigrationTimestamp = (Get-Date).ToUniversalTime()
+            }
+        }
+        
+        return $transformedRecord
+    }
+    catch {
+        Write-Log "Failed to transform record $($SourceRecord.id): $_" "ERROR"
+        throw
+    }
+}
+
+# Process a batch of records
+function Process-Batch {
+    param(
+        [object]$CosmosContext,
+        [array]$Records,
+        [string]$DestContainer
+    )
+    
+    $processedCount = 0
+    $failedCount = 0
+    $failedIds = @()
+    
+    foreach ($record in $Records) {
+        try {
+            $transformedRecord = Transform-Record -SourceRecord $record
+            
+            # Upsert the transformed record
+            $null = New-CosmosDbDocument -Context $CosmosContext -Database $DatabaseName -CollectionId $DestContainer -DocumentBody $transformedRecord -PartitionKey $transformedRecord.id
+            
+            $processedCount++
+            
+            if ($processedCount % 10 -eq 0) {
+                Write-Log "Processed $processedCount records in current batch"
+            }
+        }
+        catch {
+            Write-Log "Failed to process record $($record.id): $_" "ERROR"
+            $failedCount++
+            $failedIds += $record.id
+        }
+    }
+    
+    return @{
+        ProcessedCount = $processedCount
+        FailedCount = $failedCount
+        FailedIds = $failedIds
+    }
+}
+
+# Main migration function
+function Start-Migration {
+    param([object]$CosmosContext)
+    
+    Write-Log "Starting migration from $SourceContainer to $DestinationContainer"
+    
+    $totalProcessed = 0
+    $totalFailed = 0
+    $allFailedIds = @()
+    $startTime = Get-Date
+    
+    try {
+        # Get total record count
+        $countQuery = "SELECT VALUE COUNT(1) FROM c"
+        $totalRecords = (Invoke-CosmosDbQuery -Context $CosmosContext -Database $DatabaseName -CollectionId $SourceContainer -Query $countQuery).Documents[0]
+        
+        Write-Log "Total records to migrate: $totalRecords"
+        
+        # Process records in batches
+        $continuationToken = $null
+        $batchNumber = 0
+        
+        do {
+            $batchNumber++
+            Write-Log "Processing batch $batchNumber (batch size: $BatchSize)"
+            
+            # Query for the next batch
+            $query = "SELECT * FROM c"
+            $queryResult = Invoke-CosmosDbQuery -Context $CosmosContext -Database $DatabaseName -CollectionId $SourceContainer -Query $query -MaxItemCount $BatchSize -ContinuationToken $continuationToken
+            
+            if ($queryResult.Documents.Count -gt 0) {
+                # Process the batch
+                $batchResult = Process-Batch -CosmosContext $CosmosContext -Records $queryResult.Documents -DestContainer $DestinationContainer
+                
+                $totalProcessed += $batchResult.ProcessedCount
+                $totalFailed += $batchResult.FailedCount
+                $allFailedIds += $batchResult.FailedIds
+                
+                Write-Log "Batch $batchNumber completed. Processed: $($batchResult.ProcessedCount), Failed: $($batchResult.FailedCount)"
+                
+                # Update progress
+                $progressPercent = [math]::Round(($totalProcessed / $totalRecords) * 100, 2)
+                Write-Log "Overall progress: $totalProcessed/$totalRecords ($progressPercent%)"
+                
+                # Get continuation token for next batch
+                $continuationToken = $queryResult.ContinuationToken
+                
+                # Add delay to avoid throttling
+                Start-Sleep -Milliseconds 100
+            }
+            else {
+                Write-Log "No more records to process"
+                break
+            }
+            
+        } while ($continuationToken -and $queryResult.Documents.Count -gt 0)
+        
+        $endTime = Get-Date
+        $duration = $endTime - $startTime
+        
+        Write-Log "Migration completed!"
+        Write-Log "Total processed: $totalProcessed"
+        Write-Log "Total failed: $totalFailed"
+        Write-Log "Duration: $($duration.ToString('hh\:mm\:ss'))"
+        
+        if ($totalFailed -gt 0) {
+            Write-Log "Failed record IDs: $($allFailedIds -join ', ')" "WARNING"
+            
+            # Save failed IDs to file
+            $failedIdsFile = "failed_records_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+            $allFailedIds | Out-File -FilePath $failedIdsFile
+            Write-Log "Failed record IDs saved to: $failedIdsFile"
+        }
+        
+        # Create summary report
+        $summary = @{
+            StartTime = $startTime
+            EndTime = $endTime
+            Duration = $duration
+            TotalRecords = $totalRecords
+            ProcessedRecords = $totalProcessed
+            FailedRecords = $totalFailed
+            SuccessRate = [math]::Round(($totalProcessed / $totalRecords) * 100, 2)
+            FailedIds = $allFailedIds
+        }
+        
+        return $summary
+    }
+    catch {
+        Write-Log "Migration failed: $_" "ERROR"
+        throw
+    }
+}
+
+# Retry failed records function
+function Retry-FailedRecords {
+    param(
+        [object]$CosmosContext,
+        [array]$FailedIds
+    )
+    
+    Write-Log "Retrying $($FailedIds.Count) failed records"
+    
+    $retryProcessed = 0
+    $retryFailed = 0
+    $stillFailedIds = @()
+    
+    foreach ($failedId in $FailedIds) {
+        try {
+            # Get the original record
+            $originalRecord = Get-CosmosDbDocument -Context $CosmosContext -Database $DatabaseName -CollectionId $SourceContainer -Id $failedId -PartitionKey $failedId
+            
+            # Transform and save
+            $transformedRecord = Transform-Record -SourceRecord $originalRecord
+            $null = New-CosmosDbDocument -Context $CosmosContext -Database $DatabaseName -CollectionId $DestinationContainer -DocumentBody $transformedRecord -PartitionKey $transformedRecord.id
+            
+            $retryProcessed++
+            Write-Log "Successfully retried record: $failedId"
+        }
+        catch {
+            Write-Log "Retry failed for record $failedId: $_" "ERROR"
+            $retryFailed++
+            $stillFailedIds += $failedId
+        }
+    }
+    
+    Write-Log "Retry completed. Processed: $retryProcessed, Still failed: $retryFailed"
+    return @{
+        ProcessedCount = $retryProcessed
+        FailedCount = $retryFailed
+        FailedIds = $stillFailedIds
+    }
+}
+
+# Validation function
+function Test-MigrationResults {
+    param([object]$CosmosContext)
+    
+    Write-Log "Validating migration results..."
+    
+    try {
+        # Count records in source
+        $sourceCountQuery = "SELECT VALUE COUNT(1) FROM c"
+        $sourceCount = (Invoke-CosmosDbQuery -Context $CosmosContext -Database $DatabaseName -CollectionId $SourceContainer -Query $sourceCountQuery).Documents[0]
+        
+        # Count records in destination
+        $destCountQuery = "SELECT VALUE COUNT(1) FROM c"
+        $destCount = (Invoke-CosmosDbQuery -Context $CosmosContext -Database $DatabaseName -CollectionId $DestinationContainer -Query $destCountQuery).Documents[0]
+        
+        Write-Log "Source records: $sourceCount"
+        Write-Log "Destination records: $destCount"
+        
+        if ($sourceCount -eq $destCount) {
+            Write-Log "✓ Record counts match - migration appears successful" "SUCCESS"
+        } else {
+            Write-Log "✗ Record counts do not match - migration may be incomplete" "WARNING"
+        }
+        
+        # Sample a few records for validation
+        $sampleQuery = "SELECT TOP 5 * FROM c"
+        $sampleRecords = (Invoke-CosmosDbQuery -Context $CosmosContext -Database $DatabaseName -CollectionId $DestinationContainer -Query $sampleQuery).Documents
+        
+        Write-Log "Sample transformed records:"
+        foreach ($record in $sampleRecords) {
+            Write-Log "  ID: $($record.id), FullName: $($record.FullName), IsActive: $($record.IsActive)"
+        }
+        
+        return @{
+            SourceCount = $sourceCount
+            DestinationCount = $destCount
+            IsValid = $sourceCount -eq $destCount
+        }
+    }
+    catch {
+        Write-Log "Validation failed: $_" "ERROR"
+        throw
+    }
+}
+
+# Main execution
+try {
+    Write-Log "=== Cosmos DB Migration Started ==="
+    Write-Log "Source Container: $SourceContainer"
+    Write-Log "Destination Container: $DestinationContainer"
+    Write-Log "Batch Size: $BatchSize"
+    Write-Log "Max Concurrency: $MaxConcurrency"
+    
+    # Initialize connection
+    $cosmosContext = Initialize-CosmosConnection
+    
+    # Start migration
+    $migrationResult = Start-Migration -CosmosContext $cosmosContext
+    
+    # Retry failed records if any
+    if ($migrationResult.FailedIds.Count -gt 0) {
+        Write-Log "Retrying failed records..."
+        $retryResult = Retry-FailedRecords -CosmosContext $cosmosContext -FailedIds $migrationResult.FailedIds
+        
+        # Update final counts
+        $migrationResult.ProcessedRecords += $retryResult.ProcessedCount
+        $migrationResult.FailedRecords = $retryResult.FailedCount
+        $migrationResult.FailedIds = $retryResult.FailedIds
+    }
+    
+    # Validate results
+    $validationResult = Test-MigrationResults -CosmosContext $cosmosContext
+    
+    # Final summary
+    Write-Log "=== Migration Summary ==="
+    Write-Log "Start Time: $($migrationResult.StartTime)"
+    Write-Log "End Time: $($migrationResult.EndTime)"
+    Write-Log "Duration: $($migrationResult.Duration.ToString('hh\:mm\:ss'))"
+    Write-Log "Total Records: $($migrationResult.TotalRecords)"
+    Write-Log "Successfully Processed: $($migrationResult.ProcessedRecords)"
+    Write-Log "Failed: $($migrationResult.FailedRecords)"
+    Write-Log "Success Rate: $($migrationResult.SuccessRate)%"
+    Write-Log "Validation: $(if ($validationResult.IsValid) { 'PASSED' } else { 'FAILED' })"
+    
+    if ($migrationResult.FailedRecords -eq 0) {
+        Write-Log "🎉 Migration completed successfully!" "SUCCESS"
+        exit 0
+    } else {
+        Write-Log "⚠️  Migration completed with $($migrationResult.FailedRecords) failed records" "WARNING"
+        exit 1
+    }
+}
+catch {
+    Write-Log "Migration script failed: $_" "ERROR"
+    Write-Log "Stack trace: $($_.ScriptStackTrace)" "ERROR"
+    exit 2
+}
+finally {
+    Write-Log "=== Migration Script Ended ==="
+}
