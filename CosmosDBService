@@ -1,0 +1,200 @@
+src/
+├── main/
+│   ├── java/com/example/migration/
+│   │   ├── config/
+│   │   │   └── CosmosConfig.java
+│   │   ├── model/
+│   │   │   ├── SourceRecord.java
+│   │   │   ├── DestinationRecord.java
+│   │   │   └── MigrationProgress.java
+│   │   ├── service/
+│   │   │   └── CosmosMigrationService.java
+│   │   ├── util/
+│   │   │   └── CosmosClientFactory.java
+│   │   └── MigrationApplication.java
+│   └── resources/
+│       ├── application.yml
+│       ├── application-dev.yml
+│       ├── application-qa.yml
+│       └── application-uat.yml
+└── test/
+    └── java/com/example/migration/
+        └── service/
+            └── CosmosMigrationServiceTest.java
+
+// CosmosMigrationService.java
+package com.example.migration.service;
+
+import com.azure.cosmos.*;
+import com.azure.cosmos.models.*;
+import com.azure.cosmos.util.FeedResponse;
+import com.example.migration.config.CosmosConfig;
+import com.example.migration.model.DestinationRecord;
+import com.example.migration.model.MigrationProgress;
+import com.example.migration.model.SourceRecord;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@Service
+public class CosmosMigrationService {
+    private static final Logger logger = LoggerFactory.getLogger(CosmosMigrationService.class);
+
+    private final CosmosConfig config;
+    private final CosmosClient cosmosClient;
+    private CosmosContainer sourceContainer;
+    private CosmosContainer destinationContainer;
+    private CosmosContainer progressContainer;
+    private final ExecutorService executorService;
+    private final Semaphore semaphore;
+
+    public CosmosMigrationService(CosmosConfig config, CosmosClient cosmosClient) {
+        this.config = config;
+        this.cosmosClient = cosmosClient;
+        this.executorService = Executors.newFixedThreadPool(config.getMaxConcurrency());
+        this.semaphore = new Semaphore(config.getMaxConcurrency());
+    }
+
+    @PostConstruct
+    public void initContainers() {
+        CosmosDatabase database = cosmosClient.getDatabase(config.getDatabaseName());
+        this.sourceContainer = database.getContainer(config.getSourceContainerName());
+        this.destinationContainer = database.getContainer(config.getDestinationContainerName());
+        this.progressContainer = database.getContainer("migration_progress");
+    }
+
+    public CompletableFuture<Boolean> migrateDataAsync() {
+        return CompletableFuture.supplyAsync(() -> {
+            MigrationProgress progress = new MigrationProgress();
+            progress.setStartTime(LocalDateTime.now());
+            progress.setStatus("Starting");
+            saveProgress(progress);
+
+            try {
+                logger.info("Starting migration from {} to {}", config.getSourceContainerName(), config.getDestinationContainerName());
+
+                String query = "SELECT * FROM c";
+                CosmosQueryRequestOptions options = new CosmosQueryRequestOptions();
+
+                Iterable<FeedResponse<SourceRecord>> feedResponses = sourceContainer
+                        .queryItems(query, options, SourceRecord.class)
+                        .iterableByPage(config.getBatchSize());
+
+                AtomicInteger successCount = new AtomicInteger();
+                AtomicInteger failCount = new AtomicInteger();
+                List<String> failedIds = Collections.synchronizedList(new ArrayList<>());
+
+                for (FeedResponse<SourceRecord> page : feedResponses) {
+                    List<CompletableFuture<Void>> futures = new ArrayList<>();
+                    for (SourceRecord record : page.getResults()) {
+                        futures.add(processRecordAsync(record, successCount, failCount, failedIds));
+                    }
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+                    progress.setProcessedRecords(successCount.get());
+                    progress.setFailedRecords(failCount.get());
+                    progress.setFailedRecordIds(new ArrayList<>(failedIds));
+                    saveProgress(progress);
+                }
+
+                progress.setEndTime(LocalDateTime.now());
+                progress.setStatus(failCount.get() == 0 ? "Completed" : "Completed with errors");
+                saveProgress(progress);
+                logger.info("Migration completed. Success: {}, Failed: {}", successCount.get(), failCount.get());
+                return failCount.get() == 0;
+
+            } catch (Exception ex) {
+                logger.error("Migration failed", ex);
+                progress.setEndTime(LocalDateTime.now());
+                progress.setStatus("Failed");
+                saveProgress(progress);
+                return false;
+            }
+        }, executorService);
+    }
+
+    private CompletableFuture<Void> processRecordAsync(SourceRecord source, AtomicInteger success, AtomicInteger fail, List<String> failedIds) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                semaphore.acquire();
+                DestinationRecord destination = transform(source);
+                retrySave(destination);
+                success.incrementAndGet();
+            } catch (Exception e) {
+                logger.error("Failed to process record {}", source.getId(), e);
+                fail.incrementAndGet();
+                failedIds.add(source.getId());
+            } finally {
+                semaphore.release();
+            }
+        }, executorService);
+    }
+
+    private DestinationRecord transform(SourceRecord source) {
+        DestinationRecord dest = new DestinationRecord();
+        dest.setId(source.getId());
+        dest.setFullName(Optional.ofNullable(source.getName()).orElse("UNKNOWN").toUpperCase());
+        dest.setEmailAddress(Optional.ofNullable(source.getEmail()).orElse(""));
+        dest.setProcessedDate(LocalDateTime.now());
+        dest.setActive("Active".equalsIgnoreCase(source.getStatus()));
+        dest.setTransformationVersion("1.0");
+
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("originalCreatedDate", source.getCreatedDate());
+        metadata.put("originalStatus", source.getStatus());
+        metadata.put("migrationTimestamp", LocalDateTime.now());
+        dest.setMetadata(metadata);
+
+        return dest;
+    }
+
+    private void retrySave(DestinationRecord record) {
+        int attempts = 0;
+        while (attempts < config.getMaxRetries()) {
+            try {
+                destinationContainer.upsertItem(record);
+                return;
+            } catch (CosmosException ex) {
+                if (ex.getStatusCode() == 429) {
+                    try {
+                        Thread.sleep(config.getRetryDelayMs() * (attempts + 1));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Retry interrupted", ie);
+                    }
+                } else {
+                    throw ex;
+                }
+            }
+            attempts++;
+        }
+        throw new RuntimeException("Exceeded retry attempts for record: " + record.getId());
+    }
+
+    private void saveProgress(MigrationProgress progress) {
+        try {
+            progressContainer.upsertItem(progress);
+        } catch (Exception e) {
+            logger.warn("Failed to save progress", e);
+        }
+    }
+
+    public void shutdown() {
+        executorService.shutdown();
+        try {
+            if (!executorService.awaitTermination(30, TimeUnit.SECONDS)) {
+                executorService.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executorService.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        cosmosClient.close();
+    }
+}
