@@ -1,0 +1,4 @@
+Apache Nifi is one of the option for data transformation and migration but Nifi might not have native processors for cosmos DB, so scripts with Rest API/ Cosmos SDK can be written inside ExecuteScript processor for Read Write. Nifi supports ConcurrentTasks, Batching and its a Zero code solution (apart from custom scripts - it also has processors for data transformation and aggregation which is configurable) and doesn't need a steep learning curve.
+
+
+If the client is okay with serverless aprroach, then put the transformation logic in Python and host it as a Azure Function. This will give better performance than Mongo DB CLI.
