@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Single Record ETL Transformation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .record-box {
+            background: #f8f9fa;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            font-family: monospace;
+            position: relative;
+        }
+        .record-title {
+            background: #495057;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            display: inline-block;
+        }
+        .field {
+            margin: 8px 0;
+            padding: 5px 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .field-name {
+            font-weight: bold;
+            color: #495057;
+            display: inline-block;
+            width: 150px;
+        }
+        .field-value {
+            color: #212529;
+        }
+        .arrow {
+            text-align: center;
+            font-size: 40px;
+            color: #6c757d;
+            margin: 20px 0;
+            position: relative;
+        }
+        .arrow::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translateX(-50%);
+            width: 2px;
+            height: 30px;
+            background: #6c757d;
+            z-index: -1;
+        }
+        .transformation-note {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            padding: 10px;
+            margin: 10px 0;
+            font-size: 14px;
+            position: relative;
+        }
+        .transformation-note::before {
+            content: "🔄";
+            margin-right: 8px;
+        }
+        .highlight-new {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            border-radius: 3px;
+            padding: 2px 4px;
+        }
+        .highlight-changed {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 3px;
+            padding: 2px 4px;
+        }
+        .highlight-error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 3px;
+            padding: 2px 4px;
+        }
+        .stage-header {
+            font-size: 24px;
+            font-weight: bold;
+            color: #495057;
+            margin: 30px 0 15px 0;
+            text-align: center;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 8px;
+        }
+        .source-info {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 10px;
+            margin: 10px 0;
+            font-size: 14px;
+        }
+        .validation-results {
+            background: #f1f8e9;
+            border: 1px solid #c8e6c9;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        .validation-item {
+            margin: 5px 0;
+            padding: 5px 0;
+        }
+        .valid {
+            color: #388e3c;
+        }
+        .invalid {
+            color: #d32f2f;
+        }
+        .checkmark {
+            color: #4caf50;
+            font-weight: bold;
+        }
+        .crossmark {
+            color: #f44336;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 style="text-align: center; color: #333; margin-bottom: 30px;">Single Record ETL Transformation Journey</h1>
+        
+        <div class="stage-header">📥 EXTRACT - Raw Source Data</div>
+        
+        <div class="source-info">
+            <strong>Data Source:</strong> Customer Database (MySQL) + Orders API (REST) + Product File (CSV)
+        </div>
+        
+        <div class="record-box">
+            <div class="record-title">Original Raw Record</div>
+            <div class="field">
+                <span class="field-name">customer_id:</span>
+                <span class="field-value">1001</span>
+            </div>
+            <div class="field">
+                <span class="field-name">first_name:</span>
+                <span class="field-value">"  John  "</span>
+            </div>
+            <div class="field">
+                <span class="field-name">last_name:</span>
+                <span class="field-value">"Doe"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">email:</span>
+                <span class="field-value">"JOHN.DOE@EMAIL.COM"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">phone:</span>
+                <span class="field-value">"555-1234"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">registration_date:</span>
+                <span class="field-value">"2024-01-15"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">order_date:</span>
+                <span class="field-value">"2024-07-10T14:30:00Z"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">total_amount:</span>
+                <span class="field-value">"125.99"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">product_name:</span>
+                <span class="field-value">"Wireless Headphones"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">category:</span>
+                <span class="field-value">"Electronics"</span>
+            </div>
+        </div>
+
+        <div class="arrow">⬇️</div>
+
+        <div class="stage-header">🔄 TRANSFORM - Data Processing</div>
+
+        <div class="transformation-note">
+            <strong>Step 1: Data Cleansing</strong> - Remove whitespace, standardize formats, fix data types
+        </div>
+
+        <div class="record-box">
+            <div class="record-title">After Cleansing</div>
+            <div class="field">
+                <span class="field-name">customer_id:</span>
+                <span class="field-value">1001</span>
+            </div>
+            <div class="field">
+                <span class="field-name">first_name:</span>
+                <span class="field-value highlight-changed">"John"</span> <small>(trimmed whitespace)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">last_name:</span>
+                <span class="field-value">"Doe"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">email:</span>
+                <span class="field-value highlight-changed">"john.doe@email.com"</span> <small>(lowercase)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">phone:</span>
+                <span class="field-value highlight-changed">"+1-555-1234"</span> <small>(standardized format)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">registration_date:</span>
+                <span class="field-value">"2024-01-15"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">order_date:</span>
+                <span class="field-value highlight-changed">"2024-07-10"</span> <small>(date only)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">total_amount:</span>
+                <span class="field-value highlight-changed">125.99</span> <small>(converted to decimal)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">product_name:</span>
+                <span class="field-value">"Wireless Headphones"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">category:</span>
+                <span class="field-value">"Electronics"</span>
+            </div>
+        </div>
+
+        <div class="transformation-note">
+            <strong>Step 2: Data Validation</strong> - Check business rules and data quality
+        </div>
+
+        <div class="validation-results">
+            <div class="validation-item">
+                <span class="checkmark">✓</span> <span class="valid">Email format valid</span>
+            </div>
+            <div class="validation-item">
+                <span class="checkmark">✓</span> <span class="valid">Phone number format valid</span>
+            </div>
+            <div class="validation-item">
+                <span class="checkmark">✓</span> <span class="valid">Customer ID exists in master table</span>
+            </div>
+            <div class="validation-item">
+                <span class="checkmark">✓</span> <span class="valid">Order date within valid range</span>
+            </div>
+            <div class="validation-item">
+                <span class="checkmark">✓</span> <span class="valid">Total amount > 0</span>
+            </div>
+        </div>
+
+        <div class="transformation-note">
+            <strong>Step 3: Data Enrichment</strong> - Add calculated fields and lookup values
+        </div>
+
+        <div class="record-box">
+            <div class="record-title">After Enrichment</div>
+            <div class="field">
+                <span class="field-name">customer_id:</span>
+                <span class="field-value">1001</span>
+            </div>
+            <div class="field">
+                <span class="field-name">first_name:</span>
+                <span class="field-value">"John"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">last_name:</span>
+                <span class="field-value">"Doe"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">full_name:</span>
+                <span class="field-value highlight-new">"John Doe"</span> <small>(calculated)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">email:</span>
+                <span class="field-value">"john.doe@email.com"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">phone:</span>
+                <span class="field-value">"+1-555-1234"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">registration_date:</span>
+                <span class="field-value">"2024-01-15"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">customer_tenure:</span>
+                <span class="field-value highlight-new">183</span> <small>(days since registration)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">order_date:</span>
+                <span class="field-value">"2024-07-10"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">total_amount:</span>
+                <span class="field-value">125.99</span>
+            </div>
+            <div class="field">
+                <span class="field-name">customer_segment:</span>
+                <span class="field-value highlight-new">"Premium"</span> <small>(based on order history)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">product_name:</span>
+                <span class="field-value">"Wireless Headphones"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">category:</span>
+                <span class="field-value">"Electronics"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">category_code:</span>
+                <span class="field-value highlight-new">"ELEC"</span> <small>(lookup value)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">lifetime_value:</span>
+                <span class="field-value highlight-new">1250.00</span> <small>(calculated from all orders)</small>
+            </div>
+        </div>
+
+        <div class="arrow">⬇️</div>
+
+        <div class="stage-header">📤 LOAD - Target Data Warehouse</div>
+
+        <div class="source-info">
+            <strong>Target:</strong> Data Warehouse - Customer Order Fact Table
+        </div>
+
+        <div class="record-box">
+            <div class="record-title">Final Loaded Record</div>
+            <div class="field">
+                <span class="field-name">customer_key:</span>
+                <span class="field-value">1001</span>
+            </div>
+            <div class="field">
+                <span class="field-name">full_name:</span>
+                <span class="field-value">"John Doe"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">email:</span>
+                <span class="field-value">"john.doe@email.com"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">phone:</span>
+                <span class="field-value">"+1-555-1234"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">customer_segment:</span>
+                <span class="field-value">"Premium"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">customer_tenure:</span>
+                <span class="field-value">183</span>
+            </div>
+            <div class="field">
+                <span class="field-name">order_date:</span>
+                <span class="field-value">"2024-07-10"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">product_name:</span>
+                <span class="field-value">"Wireless Headphones"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">category_code:</span>
+                <span class="field-value">"ELEC"</span>
+            </div>
+            <div class="field">
+                <span class="field-name">order_amount:</span>
+                <span class="field-value">125.99</span>
+            </div>
+            <div class="field">
+                <span class="field-name">lifetime_value:</span>
+                <span class="field-value">1250.00</span>
+            </div>
+            <div class="field">
+                <span class="field-name">load_timestamp:</span>
+                <span class="field-value highlight-new">"2024-07-16T09:30:00Z"</span> <small>(system generated)</small>
+            </div>
+            <div class="field">
+                <span class="field-name">record_status:</span>
+                <span class="field-value highlight-new">"Active"</span> <small>(system generated)</small>
+            </div>
+        </div>
+
+        <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+            <h3 style="color: #333;">Transformation Summary:</h3>
+            <ul style="color: #666; line-height: 1.6;">
+                <li><span style="background: #fff3cd; padding: 2px 4px; border-radius: 3px;">Changed:</span> Email to lowercase, phone standardized, whitespace trimmed</li>
+                <li><span style="background: #d4edda; padding: 2px 4px; border-radius: 3px;">Added:</span> Full name, customer segment, tenure, category code, lifetime value</li>
+                <li><span style="background: #e3f2fd; padding: 2px 4px; border-radius: 3px;">Validated:</span> All business rules passed</li>
+                <li><span style="background: #f3e5f5; padding: 2px 4px; border-radius: 3px;">Metadata:</span> Load timestamp and record status added</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
